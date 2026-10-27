@@ -281,19 +281,40 @@ def h_parse_currency(
 
     notes = [f"parsed '{col}' to numeric amounts"]
     distinct = sorted({c for c in currencies if c})
-    if len(distinct) > 1:
-        other = [c for c in distinct if c != expected] if expected else distinct[1:]
-        offending = sum(1 for c in currencies if c and c in other)
+    if expected:
+        # The flag is emitted whenever a reporting currency is known, even for a
+        # single-currency column. Emitting it conditionally produced a subtle
+        # bug: appending a single-currency table to a mixed-currency one left
+        # the flag NULL on the single-currency rows, and a measure filtering
+        # "flag = TRUE" then dropped them silently. A column that is always
+        # present and never null keeps the measure honest in both DuckDB and
+        # Power BI, which coerce blanks differently.
         flag = f"{col}_is_reporting_currency"
         frame[flag] = [
-            None if c is None else (not expected or c == expected) for c in currencies
+            # No currency detected means no symbol or code was present, so the
+            # value is in the column's default (reporting) currency.
+            True if c is None else c == expected
+            for c in currencies
         ]
+        other = [c for c in distinct if c != expected]
+        offending = sum(1 for c in currencies if c and c in other)
+        if offending:
+            notes.append(
+                f"{len(distinct)} currencies present ({', '.join(distinct)}). "
+                f"{offending} row(s) are not in the reporting currency ({expected}) "
+                f"and are marked False in '{flag}'. They are retained but excluded from "
+                f"any single-currency total until a conversion rate is supplied."
+            )
+        else:
+            notes.append(
+                f"all values are in the reporting currency ({expected}); '{flag}' is "
+                f"True for every row so appended tables share one schema"
+            )
+    elif len(distinct) > 1:
         notes.append(
-            f"{len(distinct)} currencies present ({', '.join(distinct)}). "
-            f"{offending} row(s) are not in the reporting currency"
-            + (f" ({expected})" if expected else "")
-            + f" and are marked False in '{flag}'. They are retained but must be excluded "
-              f"from any single-currency total until a conversion rate is supplied."
+            f"{len(distinct)} currencies present ({', '.join(distinct)}) and no reporting "
+            f"currency is configured, so no single-currency total can be trusted. Set the "
+            f"project currency and re-run."
         )
     if unparsed:
         notes.append(f"{unparsed} value(s) quarantined")
@@ -569,11 +590,36 @@ def h_append(frame: pd.DataFrame, p: dict, ctx: ExecContext) -> tuple[pd.DataFra
         notes.append(f"{name}: {len(piece)} row(s)")
     out = pd.concat(pieces, ignore_index=True, sort=False)
     all_columns = {c for piece in pieces for c in piece.columns}
+    #: Flag columns whose absence has a knowable meaning. Leaving these NULL is
+    #: actively dangerous: a measure filtering "flag = TRUE" drops the rows,
+    #: and the loss is invisible in the total.
+    flag_defaults = {"_is_reporting_currency": True, "_is_missing": False}
     for name, piece in zip(present, pieces):
         gaps = sorted(all_columns - set(piece.columns))
-        if gaps:
+        if not gaps:
+            continue
+        filled: list[str] = []
+        for column in gaps:
+            default = next(
+                (v for suffix, v in flag_defaults.items() if column.endswith(suffix)),
+                None,
+            )
+            if default is None:
+                continue
+            mask = out[marker] == name
+            out.loc[mask, column] = out.loc[mask, column].fillna(default)
+            filled.append(f"{column}={default}")
+        remaining = [c for c in gaps if not any(
+            c.endswith(suffix) for suffix in flag_defaults
+        )]
+        if filled:
             notes.append(
-                f"{name} has no {', '.join(gaps[:4])}; those cells are null, not zero"
+                f"{name} had no {', '.join(filled)}; set to that default because the "
+                f"absence of the flag is meaningful, not unknown"
+            )
+        if remaining:
+            notes.append(
+                f"{name} has no {', '.join(remaining[:4])}; those cells are null, not zero"
             )
     missing = sorted(set(tables) - set(present))
     if missing:

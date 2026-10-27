@@ -158,7 +158,7 @@ def evaluate_measure(
     measure = model.measure(measure_name)
     if measure is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"No measure named '{measure_name}'.")
-    from ..services.dax.evaluator import evaluate
+    from ..services.dax.runtime import evaluate
 
     filters = {str(k): str(v) for k, v in (payload.get("filters") or {}).items()}
     outcome = evaluate(s, project_id, measure, model, filters=filters)

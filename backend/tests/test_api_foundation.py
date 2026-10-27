@@ -28,7 +28,7 @@ def test_health(client) -> None:
 
 
 # --- projects ------------------------------------------------------------
-def test_create_project_and_task_graph(client) -> None:
+def test_create_project_and_task_graph(client) -> None:  # noqa: D103
     r = client.post("/api/v1/projects", json={"name": "Cost Report", "currency": "USD"})
     assert r.status_code == 201
     pid = r.json()["project"]["id"]
@@ -61,13 +61,13 @@ def test_upload_accepts_data_and_records_hashes(client, project_id, labour_csv) 
     assert len(accepted) == 1 and len(accepted[0]["sha256"]) == 64
 
 
-def test_identical_reupload_is_deduplicated(client, project_id, labour_csv) -> None:
+def test_identical_reupload_is_deduplicated(client, bare_project_id, labour_csv) -> None:
     for _ in range(2):
         client.post(
-            f"/api/v1/projects/{project_id}/files",
+            f"/api/v1/projects/{bare_project_id}/files",
             files=[("files", ("labour.csv", labour_csv, "text/csv"))],
         )
-    files = client.get(f"/api/v1/projects/{project_id}/files").json()["files"]
+    files = client.get(f"/api/v1/projects/{bare_project_id}/files").json()["files"]
     assert len(files) == 1, "the same bytes must not create a second source"
 
 
@@ -117,9 +117,12 @@ def test_upload_size_limit(client, project_id, monkeypatch) -> None:
 
 
 # --- profiling -----------------------------------------------------------
-def test_profiling_requires_a_file(client, project_id) -> None:
+def test_profiling_requires_a_data_file(client, project_id) -> None:
+    """The project fixture has a transcript but no data; a transcript alone is
+    not something that can be profiled."""
     r = client.post(f"/api/v1/projects/{project_id}/profile")
-    assert r.status_code == 400 and "Upload at least one" in r.json()["detail"]
+    assert r.status_code == 400
+    assert "data file" in r.json()["detail"]
 
 
 def test_profile_detects_the_planted_defects(client, profiled_project) -> None:
@@ -220,7 +223,10 @@ def test_state_survives_a_restart(client, profiled_project) -> None:
     with TestClient(create_app()) as fresh:
         body = fresh.get(f"/api/v1/projects/{profiled_project}").json()
         assert body["project"]["id"] == profiled_project
-        assert len(body["files"]) == 3
+        data_files = [
+            f for f in body["files"] if f["kind"] in {"csv", "xlsx", "json"}
+        ]
+        assert len(data_files) == 3
         assert fresh.get(f"/api/v1/projects/{profiled_project}/profile").status_code == 200
 
 

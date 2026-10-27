@@ -269,11 +269,21 @@ def execute_plan(
         for col in frame.columns:
             populated = [v for v in frame[col].tolist()[:2000]]
             verdict = classify_column(populated, str(col))
+            non_null = frame[col].dropna()
             columns.append({
                 "name": str(col),
                 "canonical_type": verdict.canonical.value,
                 "nullable": bool(frame[col].isna().any()),
                 "role": kpi_catalog.role_for_column(str(col)),
+                # Uniqueness decides whether this column can be a primary key.
+                # Without it the modeller would hand a fact table a key it does
+                # not have, which then looks like a valid one-side of a
+                # relationship.
+                "unique": bool(
+                    len(frame) > 0 and len(non_null) == len(frame)
+                    and non_null.astype(str).nunique() == len(frame)
+                ),
+                "distinct_count": int(non_null.astype(str).nunique()) if len(non_null) else 0,
             })
 
         dataset = PreparedDataset(

@@ -245,18 +245,9 @@ class SemanticModel(Contract):
     def active_relationships(self) -> list[RelationshipDefinition]:
         return [r for r in self.relationships if r.is_active and r.approved is not False]
 
-    def relationship_path(self, from_table: str, to_table: str) -> list[list[str]]:
-        """All simple paths of active relationships between two tables.
-        More than one path means an ambiguous filter route."""
-        adjacency: dict[str, list[tuple[str, str]]] = {}
-        for r in self.active_relationships():
-            adjacency.setdefault(r.from_table, []).append((r.to_table, r.key))
-            if r.cross_filter is CrossFilter.BOTH:
-                adjacency.setdefault(r.to_table, []).append((r.from_table, r.key))
-            else:
-                # filters flow one -> many as well for traversal purposes when
-                # evaluating ambiguity of the *graph*, so record it separately
-                adjacency.setdefault(r.to_table, []).append((r.from_table, r.key))
+    def _paths(
+        self, from_table: str, to_table: str, adjacency: dict[str, list[tuple[str, str]]]
+    ) -> list[list[str]]:
         paths: list[list[str]] = []
 
         def walk(node: str, seen: set[str], trail: list[str]) -> None:
@@ -270,6 +261,38 @@ class SemanticModel(Contract):
 
         walk(from_table, {from_table}, [])
         return paths
+
+    def relationship_path(self, from_table: str, to_table: str) -> list[list[str]]:
+        """Paths in the **lookup** direction: many side -> one side.
+
+        This is the direction RELATED() follows, so it answers "can this
+        measure reach that column?".
+        """
+        adjacency: dict[str, list[tuple[str, str]]] = {}
+        for r in self.active_relationships():
+            adjacency.setdefault(r.from_table, []).append((r.to_table, r.key))
+            if r.cross_filter is CrossFilter.BOTH:
+                adjacency.setdefault(r.to_table, []).append((r.from_table, r.key))
+        return self._paths(from_table, to_table, adjacency)
+
+    def filter_paths(self, from_table: str, to_table: str) -> list[list[str]]:
+        """Paths in the **filter propagation** direction: one side -> many side.
+
+        Direction matters, and conflating the two produces false ambiguity
+        warnings. In a galaxy schema two fact tables both relate to a shared
+        dimension; treating the graph as undirected makes it look as though
+        there are several routes between the facts, when in fact a single-
+        direction relationship never propagates a filter back up from the many
+        side. Only genuine multiple routes -- two date columns into one
+        calendar, or a snowflake with two ways round -- are ambiguous, and
+        Power BI refuses exactly those.
+        """
+        adjacency: dict[str, list[tuple[str, str]]] = {}
+        for r in self.active_relationships():
+            adjacency.setdefault(r.to_table, []).append((r.from_table, r.key))
+            if r.cross_filter is CrossFilter.BOTH:
+                adjacency.setdefault(r.from_table, []).append((r.to_table, r.key))
+        return self._paths(from_table, to_table, adjacency)
 
 
 class SemanticModelAgentInput(Contract):

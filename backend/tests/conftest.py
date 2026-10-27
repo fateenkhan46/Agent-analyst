@@ -57,9 +57,51 @@ def session(isolated_env: Path) -> Iterator:
         yield s
 
 
+#: A short transcript with the decisions the downstream agents need, so the
+#: fixture exercises the MoM path as well as the data path.
+FIXTURE_TRANSCRIPT = """Cost Reporting Requirements
+Date: 2026-02-10
+Attendees: Dana Okoro (Finance Lead), Sam Petrov (Data Engineering)
+
+Dana Okoro: Budget Variance is Budget minus Actual Cost. Positive means under budget.
+Sam Petrov: Understood.
+Dana Okoro: The variance percentage is variance divided by budget, not by actual.
+Sam Petrov: Agreed. And hours? Some rows are in minutes.
+Dana Okoro: Everything becomes hours.
+Sam Petrov: Will do.
+Dana Okoro: Average cost per project should only count projects that have actual cost.
+Sam Petrov: Noted, a distinct count of projects in the cost data.
+"""
+
+#: KPIs the synthetic fixture data can actually support, so the model and
+#: measure stages have something real to work on.
+FIXTURE_KPIS = [
+    "Total Cost", "Total Budget", "Budget Variance", "Budget Variance %",
+    "Total Labour Hours", "Average Cost per Project", "Year-to-Date Cost",
+]
+
+
 @pytest.fixture
 def project_id(client) -> str:
-    r = client.post("/api/v1/projects", json={"name": "Test Project", "currency": "USD"})
+    r = client.post("/api/v1/projects", json={
+        "name": "Test Project",
+        "business_objective": "Show which projects are over budget and why.",
+        "currency": "USD", "units": "hours",
+        "desired_kpis": FIXTURE_KPIS,
+        "reporting_questions": ["Which projects are over budget?",
+                                "What is the monthly cost trend?"],
+        "reporting_period": "FY2025",
+        "meeting_transcript": FIXTURE_TRANSCRIPT,
+    })
+    assert r.status_code == 201, r.text
+    return r.json()["project"]["id"]
+
+
+@pytest.fixture
+def bare_project_id(client) -> str:
+    """A project with no KPIs and no transcript, for tests that need the
+    empty case."""
+    r = client.post("/api/v1/projects", json={"name": "Bare", "currency": "USD"})
     assert r.status_code == 201, r.text
     return r.json()["project"]["id"]
 

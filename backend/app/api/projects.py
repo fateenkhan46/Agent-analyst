@@ -182,11 +182,16 @@ def run_profile(
 ) -> dict[str, object]:
     """Profile every uploaded data source (Step 2)."""
     authorise_project(s, principal, project_id)
-    files = [f for f in repo.list_source_files(s, project_id) if f.status.value != "rejected"]
+    from ..services.profiling.readers import DATA_KINDS
+    files = [
+        f for f in repo.list_source_files(s, project_id)
+        if f.status.value != "rejected" and f.kind in DATA_KINDS
+    ]
     if not files:
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
-            "Upload at least one .csv or .xlsx file before profiling.",
+            "Upload at least one .csv or .xlsx data file before profiling. "
+            "A transcript or brief on its own carries no data to profile.",
         )
     repo.set_project_status(s, project_id, ProjectStatus.PROFILING)
     profile = profile_project(s, project_id, actor=principal.user_id)
