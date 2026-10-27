@@ -288,11 +288,19 @@ def database_tmdl(*, compatibility_level: int = 1550) -> str:
     ])
 
 
-def expressions_tmdl(parameters: dict[str, str]) -> str:
-    """Shared M expressions: the DataFolder parameter the queries read from.
+def expressions_tmdl(
+    parameters: dict[str, str], shared_queries: dict[str, str] | None = None,
+) -> str:
+    """Shared M expressions.
 
-    A parameter rather than a hard-coded path, so a developer can repoint the
-    project at their own copy of the data without editing every query.
+    Two kinds live here. ``parameters`` is the DataFolder parameter the queries
+    read from -- a parameter rather than a hard-coded path, so a developer can
+    repoint the project at their own copy of the data without editing every
+    query. ``shared_queries`` are the per-source cleaning queries that the table
+    partitions reference by name (``#"project_costs_fy25_costs"``). They are not
+    loaded as tables themselves, but they must be *defined* here or the
+    partitions that reference them fail to resolve and the model will not
+    refresh.
     """
     lines: list[str] = []
     for name, value in parameters.items():
@@ -305,6 +313,19 @@ def expressions_tmdl(parameters: dict[str, str]) -> str:
         lines.append("")
         lines.extend(_annotation("PBI_NavigationStepName", "Navigation", depth=1))
         lines.append("")
+
+    for name, query in (shared_queries or {}).items():
+        lines.append(
+            f"/// Cleaning query for the '{name}' source. Referenced by the table "
+            f"partitions that combine it; not loaded as a table itself."
+        )
+        lines.extend(_expression(f"expression {quote_name(name)}", query, depth=0))
+        lines.append(f"{INDENT}lineageTag: {_lineage_tag('expr:' + name)}")
+        lines.append(f"{INDENT}queryGroup: 'Cleaned sources'")
+        lines.append("")
+        lines.extend(_annotation("PBI_ResultType", '"Table"', depth=1))
+        lines.append("")
+
     return "\n".join(lines).rstrip() + "\n" if lines else ""
 
 

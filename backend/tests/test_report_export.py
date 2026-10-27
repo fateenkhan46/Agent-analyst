@@ -420,3 +420,42 @@ def test_verifier_catches_space_indented_tmdl() -> None:
     result = verify_project(files, root="X")
     assert not result.ok
     assert any("space indentation" in f for f in result.failures)
+
+
+def test_every_query_a_partition_references_is_defined_in_the_project(exported) -> None:
+    """A partition that references an undefined query will not refresh.
+
+    The dataset queries are deliberately two-layer: a per-source query reads
+    the raw extract and cleans it, and a dataset query combines the cleaned
+    sources by name (``#"project_costs_fy25_costs"``). Only the dataset layer
+    becomes a table partition, so the source layer has to be written into
+    expressions.tmdl as a shared query. It was not, and the exported project
+    verified cleanly while being unopenable -- every file was readable, and the
+    M referred to names that existed nowhere.
+    """
+    import re
+
+    _pid, _artifact, _verification, built = exported
+    files = {name: body.decode("utf-8", "replace") for name, body in built.files.items()}
+    tmdl = "\n".join(body for name, body in files.items() if name.endswith(".tmdl"))
+
+    # Names bound as a step inside some `let` are local; names defined by an
+    # `expression` or a `table` are global. Anything referenced but neither is
+    # a dangling reference.
+    defined = set(re.findall(r"^expression '?([^'\n=]+?)'? =", tmdl, re.M))
+    defined |= {m.strip() for m in re.findall(r"^table '?([^'\n]+?)'?$", tmdl, re.M)}
+
+    dangling: set[str] = set()
+    for name, body in files.items():
+        if not name.endswith(".tmdl"):
+            continue
+        local = set(re.findall(r'#"([^"]+)"\s*=', body))
+        for referenced in re.findall(r'#"([^"]+)"', body):
+            if referenced not in local and referenced not in defined:
+                dangling.add(referenced)
+
+    assert not dangling, (
+        f"the generated Power Query references {sorted(dangling)}, which nothing "
+        f"in the project defines; the model would fail to refresh. Defined: "
+        f"{sorted(defined)}"
+    )

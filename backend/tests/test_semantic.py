@@ -319,3 +319,46 @@ def test_hand_edit_is_revalidated_and_stored(client, modelled_project) -> None:
     edited = next(m for m in refreshed["measures"] if m["name"] == "Total Cost")
     assert edited["description"] == "Edited by hand."
     assert edited["provenance"]["origin"] == "user"
+
+
+def test_a_measure_returning_text_is_reported_unsupported_not_a_crash(
+    client, modelled_project
+) -> None:
+    """A measure may legitimately evaluate to a label rather than a number.
+
+    The evaluation contract carries a numeric value, so the runtime used to
+    call ``float()`` on whatever came back and raise ValueError, surfacing as a
+    500. Valid DAX that this engine cannot report must come back as
+    ``not_supported`` -- the same honest answer every other out-of-subset
+    construct gets.
+    """
+    model = _model(client, modelled_project)
+    target = next((m for m in model["measures"] if m["name"] == "Total Cost"), None)
+    if target is None:
+        pytest.skip("Total Cost not generated for this fixture")
+
+    # Build the expression from the measure's own dependency so the test does
+    # not assume a table name the fixture may not produce.
+    column = next(iter(target["depends_on_columns"]), "")
+    if not column:
+        pytest.skip("Total Cost has no column dependency in this fixture")
+
+    saved = client.put(
+        f"/api/v1/projects/{modelled_project}/measures/Total Cost",
+        json={"expression": f'IF(SUM({column}) > 0, "high", "low")'},
+    )
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["saved"], (
+        f"the expression is valid DAX and should store: "
+        f"{saved.json().get('validation')}"
+    )
+
+    r = client.post(
+        f"/api/v1/projects/{modelled_project}/measures/Total Cost/evaluate", json={}
+    )
+    assert r.status_code == 200, r.text
+    outcome = r.json()
+    assert outcome["supported"] is False
+    assert outcome["value"] is None
+    assert outcome["unsupported_construct"] == "non-numeric result"
+    assert "not a number" in outcome["reason"]

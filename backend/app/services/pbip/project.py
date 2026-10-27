@@ -105,13 +105,32 @@ def build_project(
     }, indent=2).encode()
     files[f"{sm}/definition/database.tmdl"] = T.database_tmdl().encode()
 
-    # Each table's partition carries the generated Power Query M, so the
-    # cleaning is visible and editable inside Power BI.
+    # The generated Power Query comes in two layers: a per-source query that
+    # reads the raw extract and cleans it, and a dataset query that combines
+    # the cleaned sources by name. A table partition is renamed to the table in
+    # Power BI, so a query that another query references cannot also be a
+    # partition -- the reference would no longer resolve. Referenced queries
+    # therefore become shared expressions, and a table that wanted one gets a
+    # partition that simply reads it.
     m_queries = execution.m_queries if execution else {}
+    referenced = _referenced_queries_in(m_queries)
+    shared_queries = {k: v for k, v in m_queries.items() if k in referenced}
+
     for table in model.tables:
-        source = m_queries.get(table.dataset_name) or m_queries.get(table.name)
-        if source:
-            table.m_expression = source
+        key = (table.dataset_name if table.dataset_name in m_queries
+               else table.name if table.name in m_queries else "")
+        if key and key in shared_queries:
+            table.m_expression = (
+                f"// '{table.name}' loads the shared cleaning query '{key}'.\n"
+                f"// That query is defined once, under Transform data, because other\n"
+                f"// queries combine it; editing it there changes every consumer.\n"
+                f"let\n"
+                f"    Source = #\"{key}\"\n"
+                f"in\n"
+                f"    Source"
+            )
+        elif key:
+            table.m_expression = m_queries[key]
         elif not table.m_expression:
             table.m_expression = _fallback_m(table)
             result.warnings.append(
@@ -130,9 +149,17 @@ def build_project(
     # Forward slashes: M accepts them on Windows, and they match the "raw/..."
     # paths the generated queries already use, so the project has one
     # convention rather than two.
-    files[f"{sm}/definition/expressions.tmdl"] = T.expressions_tmdl({
-        "DataFolder": '"../data/"',
-    }).encode()
+    # A reference nothing defines is a refresh error the first time someone
+    # opens the project, so it is reported here rather than discovered there.
+    for name in _referenced_queries(model) - set(shared_queries):
+        result.warnings.append(
+            f"A generated query references '{name}', which nothing in the project "
+            f"defines, so the model will not refresh until that query is added by "
+            f"hand in Power Query."
+        )
+    files[f"{sm}/definition/expressions.tmdl"] = T.expressions_tmdl(
+        {"DataFolder": '"../data/"'}, shared_queries,
+    ).encode()
     files[f"{sm}/definition/cultures/{model.culture}.tmdl"] = T.culture_tmdl(
         model.culture
     ).encode()
@@ -184,6 +211,34 @@ def build_project(
         name, model, report, result, execution
     ).encode()
     return result
+
+
+def _referenced_queries_in(queries: dict[str, str]) -> set[str]:
+    """Query names that one generated query refers to in another."""
+    names: set[str] = set()
+    for body in queries.values():
+        local = set(re.findall(r'#"([^"]+)"\s*=', body))
+        names |= {n for n in re.findall(r'#"([^"]+)"', body)
+                  if n not in local and n in queries}
+    return names
+
+
+def _referenced_queries(model: Any) -> set[str]:
+    """Query names a partition refers to as ``#"name"``.
+
+    Checking this rather than trusting the generator means a reference that
+    nothing defines is reported at export time, instead of surfacing as a
+    refresh error the first time someone opens the project.
+    """
+    names: set[str] = set()
+    for table in model.tables:
+        for match in re.finditer(r'#"([^"]+)"', table.m_expression or ""):
+            name = match.group(1)
+            # Step names inside a `let` are also written #"Name"; a step is
+            # bound in the same query, so exclude anything this query defines.
+            if not re.search(rf'#"{re.escape(name)}"\s*=', table.m_expression or ""):
+                names.add(name)
+    return names
 
 
 def _fallback_m(table: Any) -> str:

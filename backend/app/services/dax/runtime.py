@@ -7,6 +7,7 @@ evaluation request keeps concurrent requests isolated.
 from __future__ import annotations
 
 import re
+from decimal import Decimal
 import time
 from contextlib import contextmanager
 from collections.abc import Iterator
@@ -160,6 +161,28 @@ def evaluate(
                     f"{len(unknown)} filter(s) were ignored because they do not resolve "
                     f"against the model: {', '.join(unknown[:5])}"
                 )
+            # A measure may legitimately evaluate to a non-numeric scalar -- an
+            # IF returning a label, a text concatenation. The outcome contract
+            # carries a numeric value, so rather than coercing (which raises)
+            # report it as outside the executable subset, with the value in a
+            # note so the author can see what came back.
+            numeric = isinstance(value, (int, float, Decimal)) and not isinstance(value, bool)
+            if value is not None and not numeric:
+                return EvaluationOutcome(
+                    measure=measure.name, supported=False,
+                    unsupported_construct="non-numeric result",
+                    reason=(
+                        f"The expression evaluated to {type(value).__name__} "
+                        f"({value!r}), not a number. Measures that return text or a "
+                        f"boolean are valid DAX but cannot be reported as a numeric "
+                        f"result here, so this one is left for Power BI Desktop."
+                    ),
+                    sql_executed=evaluator.sql_log, row_counts=row_counts,
+                    filters_applied={p.describe(): p.op for p in predicates},
+                    duration_ms=int((time.perf_counter() - started) * 1000),
+                    notes=list(evaluator.notes),
+                )
+
             return EvaluationOutcome(
                 measure=measure.name, supported=True,
                 value=None if value is None else float(value),
