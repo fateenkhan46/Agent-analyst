@@ -55,6 +55,12 @@ def tool_registry() -> dict[str, Callable[..., Any]]:
 
 @lru_cache(maxsize=1)
 def _agents() -> dict[AgentName, Any]:
+    """Agents keyed by name.
+
+    ``AgentName.PREP`` owns two task kinds (plan and execute) implemented by
+    two classes, so the orchestrator selects by task kind via
+    ``get_agent_for_task`` rather than by name alone.
+    """
     from .profiling_agent import DataProfilingAgent
 
     instances: list[Any] = [DataProfilingAgent()]
@@ -77,6 +83,32 @@ def _agents() -> dict[AgentName, Any]:
     return {a.spec.name: a for a in instances}
 
 
+@lru_cache(maxsize=1)
+def _task_overrides() -> dict[str, Any]:
+    """Task kinds whose agent is not simply the owner of the task's AgentName."""
+    out: dict[str, Any] = {}
+    try:
+        from .prep_agent import TransformationExecutorAgent
+        from ..schemas.agent import TaskKind
+        out[TaskKind.EXECUTE_TRANSFORMATIONS.value] = TransformationExecutorAgent()
+    except ImportError:
+        pass
+    try:
+        from .report_agent import PbipExportAgent
+        from ..schemas.agent import TaskKind
+        out[TaskKind.EXPORT_PBIP.value] = PbipExportAgent()
+    except ImportError:
+        pass
+    return out
+
+
+def get_agent_for_task(kind: Any, owner: AgentName) -> Any:
+    """Resolve the agent for a task, honouring per-task overrides."""
+    key = getattr(kind, "value", str(kind))
+    override = _task_overrides().get(key)
+    return override if override is not None else get_agent(owner)
+
+
 def get_agent(name: AgentName) -> Any:
     agent = _agents().get(name)
     if agent is None:
@@ -94,3 +126,4 @@ def agent_specs() -> list[AgentSpec]:
 def reset_registries() -> None:
     tool_registry.cache_clear()
     _agents.cache_clear()
+    _task_overrides.cache_clear()

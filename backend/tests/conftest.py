@@ -94,6 +94,8 @@ def inconsistent_workbook() -> bytes:
             ["PRJ-2", "January 18, 2025", "(400.00)"],
             ["PRJ-3", "01/19/2025", "2,500.00 USD"],
             ["PRJ-3", "03/04/2025", "1,100.00"],
+            # exact duplicate of the first data row -> double-count risk
+            ["PRJ-1", "2025-01-15", "$1,200.00"],
         ],
         "FY24": [
             ["project_id", "transaction_date", "amount_usd"],

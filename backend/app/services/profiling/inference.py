@@ -29,6 +29,10 @@ NULL_TOKENS = {
     "", "-", "--", "n/a", "na", "nan", "none", "null", "nil", "#n/a", "#na",
     "#value!", "#ref!", "#div/0!", "(blank)", "blank", "unknown", "tbd", ".",
     "not available", "no data", "?",
+    # pandas sentinels. A parsed-but-invalid date becomes NaT, and a missing
+    # value in a nullable column becomes <NA>; without these a null date is
+    # invisible to the quality measurement and to the DAX evaluator.
+    "nat", "<na>", "nattype",
 }
 
 #: Deliberately narrow. Words like "Active", "Complete" or "Closed" are

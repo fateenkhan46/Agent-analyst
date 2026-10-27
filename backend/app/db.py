@@ -104,7 +104,12 @@ class ArtifactRow(Base):
     """
 
     __tablename__ = "artifacts"
+    #: Row identity. Distinct from ``artifact_id`` because re-saving the same
+    #: logical artifact writes a NEW ROW (version N+1); sharing the key would
+    #: collide on the second save.
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    #: The artifact's own id, stable across its versions.
+    artifact_id: Mapped[str] = mapped_column(String(64), index=True)
     project_id: Mapped[str] = mapped_column(
         String(64), ForeignKey("projects.id", ondelete="CASCADE"), index=True
     )

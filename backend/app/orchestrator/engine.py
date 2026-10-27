@@ -23,7 +23,7 @@ from ..schemas.agent import (
 from ..schemas.common import Contract, Severity
 from ..schemas.project import ProjectStatus
 from ..services import repository as repo
-from ..agents.registry import get_agent
+from ..agents.registry import get_agent_for_task
 from .graph import ensure_task_graph, refresh_statuses
 
 #: Tasks that must not start while an approval they depend on is unresolved.
@@ -81,7 +81,7 @@ def run_task(
             f"'{kind.value}' is waiting on {len(gate)} approval(s).", approvals=gate,
         )
 
-    agent = get_agent(task.owner)
+    agent = get_agent_for_task(kind, task.owner)
     payload = _payload_for(s, project_id, kind, task, extra_payload or {})
 
     task.status = TaskStatus.RUNNING

@@ -201,7 +201,7 @@ def save_artifact(s: Session, project_id: str, kind: str, model: Contract) -> st
     ).update({"is_current": False})
     artifact_id = getattr(model, "id", None) or new_id("art")
     s.add(ArtifactRow(
-        id=artifact_id, project_id=project_id, kind=kind,
+        id=new_id("ver"), artifact_id=artifact_id, project_id=project_id, kind=kind,
         version=current_max + 1, is_current=True, payload=_dump(model),
     ))
     s.flush()
@@ -216,7 +216,7 @@ def load_artifact(
         ArtifactRow.project_id == project_id, ArtifactRow.kind == kind
     )
     if artifact_id:
-        stmt = stmt.where(ArtifactRow.id == artifact_id)
+        stmt = stmt.where(ArtifactRow.artifact_id == artifact_id)
     elif version is not None:
         stmt = stmt.where(ArtifactRow.version == version)
     else:
@@ -232,7 +232,8 @@ def artifact_versions(s: Session, project_id: str, kind: str) -> list[dict[str, 
         .order_by(ArtifactRow.version.desc())
     )
     return [
-        {"id": r.id, "version": r.version, "is_current": r.is_current,
+        {"id": r.artifact_id, "version_row_id": r.id, "version": r.version,
+         "is_current": r.is_current,
          "created_at": r.created_at.isoformat() if r.created_at else None}
         for r in rows
     ]
