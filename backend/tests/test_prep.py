@@ -223,10 +223,84 @@ def test_unknown_member_is_added_once() -> None:
         dim, {"add_unknown_member": True, "key": "project_id"}, _ctx()
     )
     assert "UNASSIGNED" in out["project_id"].tolist() and len(out) == 2
-    out2, notes = h_build_dimension(
+    # Idempotent: running it again must not add a second UNASSIGNED row, which
+    # would break the dimension's key uniqueness.
+    out2, _ = h_build_dimension(
         out, {"add_unknown_member": True, "key": "project_id"}, _ctx()
     )
-    assert len(out2) == 2 and any("already present" in n for n in notes)
+    assert len(out2) == 2
+    assert out2["project_id"].tolist().count("UNASSIGNED") == 1
+
+
+def test_unmatched_fact_keys_get_their_own_dimension_row() -> None:
+    """An orphan key keeps its real code rather than being lumped into
+    UNASSIGNED, so a reader can see which code is unrecognised."""
+    from app.services.prep.executor import h_build_dimension
+
+    dim = pd.DataFrame(
+        {"project_id": ["PRJ-1"], "name": ["Alpha"], "status": ["Active"]}, dtype=object
+    )
+    fact = pd.DataFrame(
+        {"project_id": ["PRJ-1", "PRJ-99", "PRJ-99", "UNASSIGNED"]}, dtype=object
+    )
+    out, notes = h_build_dimension(
+        dim,
+        {"add_unknown_member": True, "key": "project_id",
+         "adopt_unmatched_from": ["facts.project_id"],
+         "unmatched_label": "Not in the register"},
+        _ctx({"facts": fact}),
+    )
+    keys = out["project_id"].tolist()
+    assert "PRJ-99" in keys, "the unrecognised code must stay visible"
+    assert keys.count("UNASSIGNED") == 1, (
+        "a fact table already using the UNASSIGNED literal must not cause a "
+        "second row, which would break key uniqueness"
+    )
+    assert len(keys) == len(set(keys)), f"dimension key is not unique: {keys}"
+    orphan = out[out["project_id"] == "PRJ-99"].iloc[0]
+    assert orphan["status"] == "Not in the register"
+
+
+def test_added_dimension_rows_do_not_corrupt_typed_columns() -> None:
+    """A date or numeric column must not receive a text label, and an audit
+    column has no 'original' value to record."""
+    import datetime as dt
+
+    from app.services.prep.executor import h_build_dimension
+
+    dim = pd.DataFrame({
+        "project_id": ["PRJ-1"],
+        "start_date": [dt.date(2025, 1, 1)],
+        "budget": [1000.0],
+        "project_id_original": ["PRJ-1"],
+        "status": ["Active"],
+    }, dtype=object)
+    fact = pd.DataFrame({"project_id": ["PRJ-1", "PRJ-99"]}, dtype=object)
+    out, _ = h_build_dimension(
+        dim,
+        {"add_unknown_member": True, "key": "project_id",
+         "adopt_unmatched_from": ["facts.project_id"],
+         "unmatched_label": "Not in the register"},
+        _ctx({"facts": fact}),
+    )
+    added = out[out["project_id"] == "PRJ-99"].iloc[0]
+    assert added["status"] == "Not in the register"
+    assert is_nullish(added["start_date"]), "a date column must not get a text label"
+    assert is_nullish(added["budget"]), "a numeric column must not get a text label"
+    assert is_nullish(added["project_id_original"]), (
+        "an added row has no pre-transformation value to record"
+    )
+
+
+def test_textual_detection_survives_a_pandas_map() -> None:
+    """pandas 3 gives a column the 'str' dtype after an elementwise map, so a
+    dtype == object test silently reports False for every cleaned column."""
+    from app.services.prep.executor import _is_textual
+
+    frame = pd.DataFrame({"manager": ["Tom  Okafor", "Ann Lee"]}, dtype=object)
+    frame["manager"] = frame["manager"].map(lambda v: " ".join(str(v).split()))
+    assert frame["manager"].dtype != object, "fixture no longer exercises the trap"
+    assert _is_textual(frame["manager"])
 
 
 # --- planning ------------------------------------------------------------

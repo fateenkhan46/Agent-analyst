@@ -281,7 +281,164 @@ def plan_transformations(
         return step
 
     # ------------------------------------------------------------------
-    # 1. Per-table cleaning, in a deliberate order:
+    # 0. Which tables describe the same entity and will be appended.
+    #
+    # Needed before the joins, because two tables that get appended into one
+    # are not related to each other -- they become one table.
+    # ------------------------------------------------------------------
+    groups = _append_groups(profile, mappings)
+    appended: dict[str, list[str]] = {_dataset_name(group): group for group in groups}
+
+    # ------------------------------------------------------------------
+    # 1. Join proposals, computed next.
+    #
+    # They have to come before the cleaning steps because of an invariant that
+    # is easy to miss: join keys must be normalised on BOTH sides or neither.
+    # Deciding normalisation per column in isolation normalises the side that
+    # looks inconsistent and leaves the tidy side alone, which silently breaks
+    # the very relationship the normalisation was for -- the key-overlap
+    # *measurement* normalises both sides internally, so it still reports a
+    # perfect match while the executed data no longer joins at all.
+    # ------------------------------------------------------------------
+    joins: list[JoinProposal] = []
+    members = {t for group in appended.values() for t in group}
+    for overlap in profile.key_overlaps:
+        oriented = orient(overlap)
+        if oriented is None:
+            continue
+        child_t, child_c, parent_t, parent_c = oriented
+        if child_t in members and parent_t in members:
+            continue  # same appended entity; not a join
+        child_share = (
+            overlap.left_match_share if f"{child_t}.{child_c}" == overlap.left
+            else overlap.right_match_share
+        )
+        if child_share < MIN_CANDIDATE_SHARE:
+            continue
+        child_distinct = (
+            overlap.left_distinct if f"{child_t}.{child_c}" == overlap.left
+            else overlap.right_distinct
+        )
+        parent_unique = (
+            overlap.right_is_unique if f"{parent_t}.{parent_c}" == overlap.right
+            else overlap.left_is_unique
+        )
+        confidence = (
+            Confidence.HIGH if child_share >= STRONG_SHARE and parent_unique
+            else Confidence.MEDIUM if child_share >= 0.8
+            else Confidence.LOW
+        )
+        canon = {
+            (m.source_table, m.source_column): m.canonical_name for m in mappings
+        }
+        joins.append(JoinProposal(
+            left_table=child_t, left_keys=[canon.get((child_t, child_c), child_c)],
+            right_table=parent_t, right_keys=[canon.get((parent_t, parent_c), parent_c)],
+            kind="left",
+            implied_cardinality=overlap.implied_cardinality,
+            match_share=round(child_share, 4),
+            unmatched_left=round(child_distinct * (1 - child_share)),
+            unmatched_right=max(0, overlap.right_distinct - overlap.matched_distinct),
+            fan_out_risk=not parent_unique,
+            recommended=parent_unique and child_share >= MIN_CANDIDATE_SHARE,
+            recommendation_reason=(
+                f"{child_share:.1%} of {child_t}.{child_c} keys resolve in "
+                f"{parent_t}.{parent_c}"
+                + ("" if parent_unique else
+                   "; the parent side is NOT unique, so this would fan out and inflate "
+                   "additive measures")
+            ),
+            confidence=confidence,
+            evidence=[
+                f"{overlap.matched_distinct} of {child_distinct} distinct child keys matched",
+                f"parent side unique: {parent_unique}",
+                f"name similarity {overlap.name_similarity:.2f} (context only, not the basis "
+                f"for this proposal)",
+            ] + ([f"unmatched examples: "
+                  f"{', '.join((overlap.unmatched_left_examples if f'{child_t}.{child_c}' == overlap.left else overlap.unmatched_right_examples)[:4])}"]
+                 if child_share < 1.0 else []),
+        ))
+
+
+    # Every key column taking part in a join, as "table.canonical_column".
+    join_key_columns: set[str] = set()
+    for join in joins:
+        for key in join.left_keys:
+            join_key_columns.add(f"{join.left_table}.{key}")
+        for key in join.right_keys:
+            join_key_columns.add(f"{join.right_table}.{key}")
+
+    # Which join groups contain at least one inconsistently-written key. The
+    # whole group is then normalised together.
+    canonical_by_source = {
+        (m.source_table, m.source_column): m.canonical_name for m in mappings
+    }
+
+    def _key_is_inconsistent(table_name: str, canonical: str) -> bool:
+        table = next((t for t in profile.tables if t.table_name == table_name), None)
+        if table is None:
+            return False
+        source_column = next(
+            (
+                m.source_column for m in mappings
+                if m.source_table == table_name and m.canonical_name == canonical
+            ),
+            None,
+        )
+        if source_column is None:
+            return False
+        column = table.column(source_column)
+        if column is None:
+            return False
+        styles = {f.pattern for f in column.format_variants}
+        return len(styles) > 1 or any(
+            re.search(r"\s", str(v.get("value", ""))) for v in column.top_values
+        )
+
+    # Normalisation propagates across the whole CONNECTED COMPONENT of join
+    # keys, not just the pair in one join.
+    #
+    # Deciding it per join is not enough: if labour<->register needs
+    # normalisation and cost<->register does not, normalising the first pair
+    # rewrites the register's keys and silently breaks its join to cost, which
+    # was previously fine. Keys that join, directly or transitively, must share
+    # one representation.
+    parent: dict[str, str] = {ref: ref for ref in join_key_columns}
+
+    def find(ref: str) -> str:
+        while parent[ref] != ref:
+            parent[ref] = parent[parent[ref]]
+            ref = parent[ref]
+        return ref
+
+    def union(a: str, b: str) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[rb] = ra
+
+    for join in joins:
+        left_refs = [f"{join.left_table}.{k}" for k in join.left_keys]
+        right_refs = [f"{join.right_table}.{k}" for k in join.right_keys]
+        for ref in left_refs[1:] + right_refs:
+            union(left_refs[0], ref)
+
+    components: dict[str, set[str]] = {}
+    for ref in join_key_columns:
+        components.setdefault(find(ref), set()).add(ref)
+
+    keys_to_normalise: set[str] = set()
+    for component in components.values():
+        if any(_key_is_inconsistent(*ref.split(".", 1)) for ref in component):
+            keys_to_normalise |= component
+
+    #: Join keys into which a fill-missing step writes a sentinel value. The
+    #: sentinel is a key the dimension has never seen, so the dimension needs a
+    #: member for it -- otherwise the step that was meant to keep those rows
+    #: visible is exactly what drops them from every sliced total.
+    sentinel_keys: set[str] = set()
+
+    # ------------------------------------------------------------------
+    # 2. Per-table cleaning, in a deliberate order:
     #    rename -> trim -> parse -> flag -> derive
     # ------------------------------------------------------------------
     for table in profile.tables:
@@ -342,26 +499,31 @@ def plan_transformations(
                         columns=[canon],
                     )
 
-            # identifier normalisation where a key is written inconsistently
-            if role in kpi_catalog.KEY_ROLES:
-                styles = {f.pattern for f in col.format_variants}
-                inconsistent = len(styles) > 1 or any(
-                    re.search(r"\s", str(v.get("value", ""))) for v in col.top_values
+            # Identifier normalisation, decided per JOIN GROUP above so both
+            # sides of a relationship are always normalised together.
+            if f"{tname}.{canon}" in keys_to_normalise:
+                styles = sorted({f.pattern for f in col.format_variants})
+                partners = sorted(
+                    ref for ref in keys_to_normalise if ref != f"{tname}.{canon}"
                 )
-                if inconsistent:
-                    add(
-                        TransformOp.NORMALISE_IDENTIFIER, tname,
-                        {"column": canon, "upper": True, "strip_separators": True,
-                         "strip_leading_zeros": True},
-                        title=f"Normalise the {canon} identifier format",
-                        reason="The same identifier is written differently across systems "
-                               "(case, spaces, separators, leading zeros), which breaks the "
-                               "relationship to the dimension.",
-                        effect="Rewrites the key to a single canonical form. A "
-                               "'<name>_original' column preserves the source value.",
-                        evidence=[f"formats present: {', '.join(sorted(styles))}"],
-                        columns=[canon],
-                    )
+                add(
+                    TransformOp.NORMALISE_IDENTIFIER, tname,
+                    {"column": canon, "upper": True, "strip_separators": True,
+                     "strip_leading_zeros": True},
+                    title=f"Normalise the {canon} identifier format",
+                    reason="The same identifier is written differently across systems "
+                           "(case, spaces, separators, leading zeros), which breaks the "
+                           "relationship to the dimension. Every key on both sides of "
+                           "the join is normalised together -- normalising only the "
+                           "untidy side would break the join instead of fixing it.",
+                    effect="Rewrites the key to a single canonical form on every table "
+                           "that joins on it. A '<name>_original' column preserves the "
+                           "source value.",
+                    evidence=[f"formats present: {', '.join(styles)}"]
+                    + ([f"normalised together with: {', '.join(partners[:4])}"]
+                       if partners else []),
+                    columns=[canon],
+                )
 
             # dates: parse each detected format rather than guessing one
             if col.inferred_type.is_temporal:
@@ -457,8 +619,9 @@ def plan_transformations(
                     columns=[canon],
                 )
 
-            # missing values on a key: flag, never fill
+            # missing values on a key: substitute an explicit member, never drop
             if role in kpi_catalog.KEY_ROLES and (col.null_count + col.blank_count):
+                sentinel_keys.add(f"{tname}.{canon}")
                 add(
                     TransformOp.FILL_MISSING, tname,
                     {"column": canon, "value": "UNASSIGNED", "flag_column": f"{canon}_is_missing"},
@@ -487,7 +650,7 @@ def plan_transformations(
                 )
 
     # ------------------------------------------------------------------
-    # 2. Duplicates: reported, and only removed with approval
+    # 3. Duplicates: reported, and only removed with approval
     # ------------------------------------------------------------------
     duplicate_findings: list[DuplicateFinding] = []
     for table in profile.tables:
@@ -528,13 +691,9 @@ def plan_transformations(
                 ))
 
     # ------------------------------------------------------------------
-    # 3. Append tables that describe the same entity
+    # 4. Append tables that describe the same entity (grouped in step 0)
     # ------------------------------------------------------------------
-    groups = _append_groups(profile, mappings)
-    appended: dict[str, list[str]] = {}
-    for group in groups:
-        name = _dataset_name(group)
-        appended[name] = group
+    for name, group in appended.items():
         total = sum(t.row_count for t in profile.tables if t.table_name in group)
         add(
             TransformOp.APPEND_TABLES, name, {"tables": group, "source_column": "source_table"},
@@ -548,89 +707,59 @@ def plan_transformations(
                       f" rows" for t in group],
         )
 
-    # ------------------------------------------------------------------
-    # 4. Join proposals -- from measured overlap only
-    # ------------------------------------------------------------------
-    joins: list[JoinProposal] = []
-    members = {t for group in appended.values() for t in group}
-    for overlap in profile.key_overlaps:
-        oriented = orient(overlap)
-        if oriented is None:
-            continue
-        child_t, child_c, parent_t, parent_c = oriented
-        if child_t in members and parent_t in members:
-            continue  # same appended entity; not a join
-        child_share = (
-            overlap.left_match_share if f"{child_t}.{child_c}" == overlap.left
-            else overlap.right_match_share
-        )
-        if child_share < MIN_CANDIDATE_SHARE:
-            continue
-        child_distinct = (
-            overlap.left_distinct if f"{child_t}.{child_c}" == overlap.left
-            else overlap.right_distinct
-        )
-        parent_unique = (
-            overlap.right_is_unique if f"{parent_t}.{parent_c}" == overlap.right
-            else overlap.left_is_unique
-        )
-        confidence = (
-            Confidence.HIGH if child_share >= STRONG_SHARE and parent_unique
-            else Confidence.MEDIUM if child_share >= 0.8
-            else Confidence.LOW
-        )
-        canon = {
-            (m.source_table, m.source_column): m.canonical_name for m in mappings
-        }
-        joins.append(JoinProposal(
-            left_table=child_t, left_keys=[canon.get((child_t, child_c), child_c)],
-            right_table=parent_t, right_keys=[canon.get((parent_t, parent_c), parent_c)],
-            kind="left",
-            implied_cardinality=overlap.implied_cardinality,
-            match_share=round(child_share, 4),
-            unmatched_left=round(child_distinct * (1 - child_share)),
-            unmatched_right=max(0, overlap.right_distinct - overlap.matched_distinct),
-            fan_out_risk=not parent_unique,
-            recommended=parent_unique and child_share >= MIN_CANDIDATE_SHARE,
-            recommendation_reason=(
-                f"{child_share:.1%} of {child_t}.{child_c} keys resolve in "
-                f"{parent_t}.{parent_c}"
-                + ("" if parent_unique else
-                   "; the parent side is NOT unique, so this would fan out and inflate "
-                   "additive measures")
-            ),
-            confidence=confidence,
-            evidence=[
-                f"{overlap.matched_distinct} of {child_distinct} distinct child keys matched",
-                f"parent side unique: {parent_unique}",
-                f"name similarity {overlap.name_similarity:.2f} (context only, not the basis "
-                f"for this proposal)",
-            ] + ([f"unmatched examples: "
-                  f"{', '.join((overlap.unmatched_left_examples if f'{child_t}.{child_c}' == overlap.left else overlap.unmatched_right_examples)[:4])}"]
-                 if child_share < 1.0 else []),
-        ))
-
-    # Unknown members for orphan keys, so no row disappears from a total.
+    # Members for orphan keys, so no fact row disappears from a sliced total.
+    #
+    # Each orphan gets its OWN dimension row carrying its real code, rather
+    # than being lumped into a single "UNASSIGNED" bucket. That is what the
+    # stakeholder asked for in the sample meeting -- "leave it visible, I'll
+    # check whether it's a typo" -- and a bucket would hide which code is
+    # unrecognised. A genuinely blank key still becomes UNASSIGNED, because
+    # there is no code to preserve.
+    handled_dimensions: set[str] = set()
     for join in joins:
-        if join.unmatched_left and join.recommended:
-            add(
-                TransformOp.BUILD_DIMENSION, join.right_table,
-                {"add_unknown_member": True, "key": join.right_keys[0],
-                 "unknown_key": "UNASSIGNED",
-                 "source_keys_from": f"{join.left_table}.{join.left_keys[0]}"},
-                title=f"Add an 'UNASSIGNED' member to {join.right_table} for "
-                      f"{join.unmatched_left} unmatched key(s)",
-                reason="Keys present in the fact table but absent from the dimension would "
-                       "otherwise drop those rows out of every sliced total, so the report "
-                       "would not reconcile to the source.",
-                effect=f"Adds one 'UNASSIGNED' dimension row; {join.unmatched_left} orphan "
-                       f"key(s) remain visible and are attributed to it.",
-                evidence=join.evidence[:2],
-                columns=[join.right_keys[0]],
-            )
+        if not join.recommended:
+            continue
+        writes_sentinel = any(
+            f"{join.left_table}.{key}" in sentinel_keys for key in join.left_keys
+        )
+        if not join.unmatched_left and not writes_sentinel:
+            continue
+        signature = f"{join.right_table}.{join.right_keys[0]}"
+        if signature in handled_dimensions:
+            continue
+        handled_dimensions.add(signature)
+        add(
+            TransformOp.BUILD_DIMENSION, join.right_table,
+            {"add_unknown_member": True, "key": join.right_keys[0],
+             "unknown_key": "UNASSIGNED",
+             "adopt_unmatched_from": [
+                 f"{j.left_table}.{j.left_keys[0]}" for j in joins
+                 if j.right_table == join.right_table
+                 and j.right_keys[:1] == join.right_keys[:1]
+             ],
+             "unmatched_label": "Not in the register"},
+            title=(
+                f"Add dimension rows for {join.unmatched_left} unrecognised "
+                f"{join.right_keys[0]} value(s)" if join.unmatched_left
+                else f"Add an 'UNASSIGNED' member to {join.right_table} for rows whose "
+                     f"{join.left_keys[0]} was missing"
+            ),
+            reason="Keys present in a fact table but absent from the dimension would "
+                   "drop those rows out of every sliced total, so the report would not "
+                   "reconcile to the source. Each unrecognised code gets its own row so "
+                   "it stays visible and identifiable.",
+            effect=f"Adds one row per unrecognised key (and an 'UNASSIGNED' row for "
+                   f"genuinely blank keys), labelled so a reader can see the code is "
+                   f"not in the register.",
+            evidence=join.evidence[:2] + [
+                f"unmatched examples: "
+                f"{', '.join(str(x) for x in join.evidence[-1:])[:80]}"
+            ],
+            columns=[join.right_keys[0]],
+        )
 
     # ------------------------------------------------------------------
-    # 5. A date table, if any date survived and time intelligence is wanted
+    # 6. A date table, if any date survived and time intelligence is wanted
     # ------------------------------------------------------------------
     date_columns: list[str] = []
     for table in profile.tables:
@@ -660,7 +789,7 @@ def plan_transformations(
         )
 
     # ------------------------------------------------------------------
-    # 6. Conformed dimensions for shared categories
+    # 7. Conformed dimensions for shared categories
     # ------------------------------------------------------------------
     for issue in profile.cross_table_issues:
         if issue.code != "keys.shared_category":
@@ -691,7 +820,7 @@ def plan_transformations(
         )
 
     # ------------------------------------------------------------------
-    # 7. Conflicting vocabularies -> explicit mapping, needs approval
+    # 8. Conflicting vocabularies -> explicit mapping, needs approval
     # ------------------------------------------------------------------
     for issue in profile.cross_table_issues:
         if issue.code != "keys.conflicting_category_values":

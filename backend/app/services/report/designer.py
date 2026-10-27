@@ -305,6 +305,11 @@ def _executive_page(
             "A line chart over a continuous month axis shows the shape of the trend -- "
             "whether cost is accelerating -- which a bar chart of the same data hides."
         )
+        ytd = headline.get("ytd_cost")
+        if ytd:
+            # Cumulative beside monthly answers "are we on track for the year",
+            # which the monthly bars alone cannot.
+            bindings.append(_measure_binding(ytd, role=FieldRole.VALUES))
         if budget:
             bindings.append(_measure_binding(budget, role=FieldRole.VALUES))
             combo_type = VisualType.LINE_CLUSTERED_COLUMN
@@ -312,6 +317,13 @@ def _executive_page(
                 "Columns for monthly cost against a line for budget puts the two on one "
                 "axis, so over- and under-spend is read directly rather than inferred "
                 "from two charts."
+            )
+        elif ytd:
+            combo_type = VisualType.LINE_CLUSTERED_COLUMN
+            rationale = (
+                "Monthly cost as columns with the year-to-date running total as a line: "
+                "one shows the period, the other the trajectory, and reading them "
+                "together is what answers whether the year is on track."
             )
         page.visuals.append(VisualDefinition(
             name="trend", visual_type=combo_type,
@@ -419,6 +431,22 @@ def _analysis_page(
         index += 1
 
     y = GUTTER + ROW_HEIGHT + GUTTER
+    average = headline.get("average_cost_per_project")
+    if average is not None:
+        page.visuals.append(VisualDefinition(
+            name="avg_cost_card", visual_type=VisualType.CARD,
+            title=average.name, subtitle=average.unit,
+            layout=Layout(x=GUTTER, y=y, width=300.0, height=CARD_HEIGHT),
+            bindings=[_measure_binding(average)],
+            business_question="What does a typical project cost?",
+            design_rationale="A portfolio-level ratio belongs on the analysis page "
+                             "rather than the project table, where a per-row value "
+                             "would be the project's own cost and mean something "
+                             "different.",
+            show_data_labels=True, show_legend=False,
+        ))
+        y += CARD_HEIGHT + GUTTER
+
     month = _find_month(model)
     hours = headline.get("total_labour_hours")
     if month and portfolio and hours:

@@ -38,6 +38,12 @@ def measure(
 
         for col in frame.columns:
             ref = f"{name}.{col}"
+            # Audit and quarantine columns hold the pre-transformation value
+            # on purpose, so they are heterogeneous by design. Measuring type
+            # conformance on them reports a problem that is actually the
+            # feature working.
+            if str(col).endswith(("_original", "_unparsed", "_source_format")):
+                continue
             series = frame[col]
             total = len(series)
             if not total:

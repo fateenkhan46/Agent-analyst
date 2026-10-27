@@ -41,6 +41,55 @@ class TransformFailed(Exception):
         self.message = message
 
 
+#: Columns that exist to preserve what the data looked like BEFORE a
+#: transformation. A row we add ourselves has no "before", so writing a label
+#: into one would be a small lie that then shows up as a type-conformance
+#: failure.
+AUDIT_SUFFIXES = ("_original", "_unparsed", "_source_format")
+
+
+def _is_audit_column(name: str) -> bool:
+    return str(name).endswith(AUDIT_SUFFIXES)
+
+
+def _is_textual(series: pd.Series) -> bool:
+    """Can this column hold a text label?
+
+    Two traps, both of which produced wrong data before being pinned down:
+
+    * ``dtype == object`` is wrong on pandas 3, which gives a column the
+      dedicated ``str`` dtype after an elementwise map. That reported False for
+      exactly the columns that had been cleaned, leaving the label off the
+      dimension rows added for unmatched keys -- the one thing those rows exist
+      to carry.
+    * dtype alone is wrong the other way too: a parsed date column holds
+      ``datetime.date`` objects in an *object* column, so it is not
+      ``datetime64`` and would have had a text label written into it, which
+      then shows up as a type-conformance failure.
+
+    So the decision is made on the values, using the same classifier the
+    profiler uses.
+    """
+    from pandas.api.types import (
+        is_bool_dtype, is_datetime64_any_dtype, is_numeric_dtype,
+        is_timedelta64_dtype,
+    )
+
+    if (
+        is_numeric_dtype(series) or is_bool_dtype(series)
+        or is_datetime64_any_dtype(series) or is_timedelta64_dtype(series)
+    ):
+        return False
+
+    from ..profiling.inference import classify_column
+
+    sample = [v for v in series.tolist()[:200] if not is_nullish(v)]
+    if not sample:
+        return True
+    verdict = classify_column(sample, str(series.name or ""))
+    return not (verdict.canonical.is_temporal or verdict.canonical.is_numeric)
+
+
 class ExecContext:
     """Shared state during an execution: the working frames and the notes."""
 
@@ -187,6 +236,17 @@ def h_parse_date(frame: pd.DataFrame, p: dict, ctx: ExecContext) -> tuple[pd.Dat
         else:
             parsed.append(d.to_pydatetime())
             failed.append(None)
+    # If no value carries a time component, store plain dates. The generated
+    # calendar holds dates, and a datetime serialises as "2025-03-15 00:00:00"
+    # while a date serialises as "2025-03-15" -- so mixing them makes every
+    # relationship to the date dimension resolve nothing, and every
+    # time-intelligence measure silently returns blank.
+    has_time = any(
+        v is not None and (v.hour or v.minute or v.second or v.microsecond)
+        for v in parsed
+    )
+    if not has_time:
+        parsed = [None if v is None else v.date() for v in parsed]
     frame[col] = parsed
     unparsed = sum(1 for f in failed if f is not None)
     if unparsed:
@@ -716,6 +776,7 @@ def h_build_dimension(
     notes: list[str] = []
     key = p.get("key", "")
 
+
     if p.get("from_columns"):
         values: list[str] = []
         for ref in p["from_columns"]:
@@ -739,18 +800,64 @@ def h_build_dimension(
         unknown = p.get("unknown_key", "UNASSIGNED")
         if key not in frame.columns:
             return frame, [f"key '{key}' not present; skipped"]
-        if (frame[key].astype(str) == str(unknown)).any():
-            return frame, [f"'{unknown}' already present in '{key}'; nothing added"]
-        row = {c: None for c in frame.columns}
-        row[key] = unknown
-        for col in frame.columns:
-            if col != key and frame[col].dtype == object:
-                row[col] = "Unassigned"
-        out = pd.concat([frame, pd.DataFrame([row])], ignore_index=True)
-        return out, [
-            f"added the '{unknown}' member to '{key}' so fact rows with an unmatched key "
-            f"stay visible in every total"
-        ]
+
+        existing = {str(v) for v in frame[key].tolist() if not is_nullish(v)}
+        label = str(p.get("unmatched_label", "Not in the dimension"))
+        # The unknown member is added below, and a fact table may already use
+        # that same literal (the fill-missing step writes it into blank keys).
+        # Without this the key would be added twice and the dimension would
+        # stop being unique -- which silently reclassifies it as a fact table.
+        existing.add(str(unknown))
+
+        # Collect every key value the fact tables use that this dimension does
+        # not have. Each becomes its own row, keeping the real code visible.
+        wanted: list[str] = []
+        for reference in p.get("adopt_unmatched_from", []) or []:
+            source_table, _, source_column = str(reference).partition(".")
+            source = ctx.frames.get(source_table)
+            if source is None or source_column not in source.columns:
+                notes.append(f"{reference} not available; its keys were not adopted")
+                continue
+            for value in source[source_column].tolist():
+                if is_nullish(value):
+                    continue
+                text = str(value)
+                if text not in existing and text not in wanted:
+                    wanted.append(text)
+
+        had_unknown = str(unknown) in {
+            str(v) for v in frame[key].tolist() if not is_nullish(v)
+        }
+        new_rows: list[dict[str, Any]] = []
+        if not had_unknown:
+            blank_row = {c: None for c in frame.columns}
+            blank_row[key] = unknown
+            for col in frame.columns:
+                if col != key and _is_textual(frame[col]) and not _is_audit_column(col):
+                    blank_row[col] = "Unassigned"
+            new_rows.append(blank_row)
+            notes.append(
+                f"added the '{unknown}' member so fact rows with a blank '{key}' stay "
+                f"visible in every total"
+            )
+        for value in wanted:
+            row = {c: None for c in frame.columns}
+            row[key] = value
+            for col in frame.columns:
+                if col != key and _is_textual(frame[col]) and not _is_audit_column(col):
+                    row[col] = label
+            new_rows.append(row)
+        if wanted:
+            notes.append(
+                f"added {len(wanted)} row(s) for key(s) used by a fact table but absent "
+                f"here ({', '.join(wanted[:5])}), each labelled '{label}' so the code "
+                f"stays visible rather than being lumped into '{unknown}' or dropped "
+                f"from every sliced total"
+            )
+        if not new_rows:
+            return frame, [f"every fact key already resolves in '{key}'; nothing added"]
+        out = pd.concat([frame, pd.DataFrame(new_rows)], ignore_index=True)
+        return out, notes
 
     # plain distinct dimension from the current frame
     cols = [c for c in (p.get("columns") or frame.columns) if c in frame.columns]

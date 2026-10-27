@@ -576,16 +576,45 @@ def e_build_dimension(step: TransformationStep, prev: str) -> tuple[str, str]:
     if p.get("add_unknown_member"):
         key = p.get("key", "")
         unknown = p.get("unknown_key", "UNASSIGNED")
+        label = p.get("unmatched_label", "Not in the dimension")
+        sources = [str(r) for r in (p.get("adopt_unmatched_from") or [])]
+        if not sources:
+            return name, (
+                f"// Fact rows whose key is blank would drop out of every sliced\n"
+                f"    // total. This explicit member keeps them visible.\n"
+                f"    let\n"
+                f"        Blank   = Table.FromRecords({{Record.FromList(\n"
+                f"            List.Transform(Table.ColumnNames({prev}), each null),\n"
+                f"            Table.ColumnNames({prev}))}}),\n"
+                f"        Member  = Table.ReplaceValue(Blank, null, {mstr(unknown)},\n"
+                f"            Replacer.ReplaceValue, {{{mstr(key)}}}),\n"
+                f"        Unioned = Table.Combine({{{prev}, Member}})\n"
+                f"    in\n"
+                f"        Unioned"
+            )
+        fact_keys = ", ".join(
+            f"Table.Column({ident(r.split('.', 1)[0])}, {mstr(r.split('.', 1)[1])})"
+            for r in sources
+        )
         return name, (
-            f"// Fact rows whose key is missing from this dimension would drop out of\n"
-            f"    // every sliced total. This explicit member keeps them visible.\n"
+            f"// A fact key with no row here would drop out of every sliced total, so\n"
+            f"    // the report would not reconcile to the source. Each unrecognised\n"
+            f"    // code gets its own row, labelled, so it stays visible and\n"
+            f"    // identifiable rather than vanishing or being lumped together.\n"
             f"    let\n"
-            f"        Blank   = Table.FromRecords({{Record.FromList(\n"
-            f"            List.Transform(Table.ColumnNames({prev}), each null),\n"
-            f"            Table.ColumnNames({prev}))}}),\n"
-            f"        Member  = Table.ReplaceValue(Blank, null, {mstr(unknown)},\n"
-            f"            Replacer.ReplaceValue, {{{mstr(key)}}}),\n"
-            f"        Unioned = Table.Combine({{{prev}, Member}})\n"
+            f"        FactKeys  = List.Distinct(List.RemoveNulls(List.Combine("
+            f"{{{fact_keys}}}))),\n"
+            f"        Known     = List.Distinct(Table.Column({prev}, {mstr(key)})),\n"
+            f"        Missing   = List.Difference(FactKeys, Known),\n"
+            f"        AllKeys   = List.Distinct(List.Combine({{Missing, "
+            f"{{{mstr(unknown)}}}}})),\n"
+            f"        Template  = Table.ColumnNames({prev}),\n"
+            f"        NewRows   = Table.FromRecords(List.Transform(AllKeys, (k) =>\n"
+            f"            Record.FromList(\n"
+            f"                List.Transform(Template, (c) =>\n"
+            f"                    if c = {mstr(key)} then k else {mstr(label)}),\n"
+            f"                Template))),\n"
+            f"        Unioned   = Table.Combine({{{prev}, NewRows}})\n"
             f"    in\n"
             f"        Unioned"
         )
