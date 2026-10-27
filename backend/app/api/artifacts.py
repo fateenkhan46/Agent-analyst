@@ -81,6 +81,26 @@ def get_artifact(
     }
 
 
+@router.get("/model/diagram")
+def model_diagram(
+    project_id: str,
+    version: int | None = None,
+    principal: Principal = Depends(current_principal),
+    s: Session = Depends(get_session),
+) -> dict[str, object]:
+    """Node positions and edges for the Data Model page.
+
+    The layout is computed here rather than in the browser so the diagram the
+    UI draws is the same one the designer reasoned about, and so a warning on
+    an edge (an inactive relationship, an ambiguous path) travels with it.
+    """
+    authorise_project(s, principal, project_id)
+    _, model = _load(s, project_id, "model", version)
+    from ..services.semantic.designer import build_diagram
+
+    return {"diagram": build_diagram(model).model_dump(mode="json")}
+
+
 # --------------------------------------------------------------------------
 # Targeted edits -- a user correcting an agent
 # --------------------------------------------------------------------------

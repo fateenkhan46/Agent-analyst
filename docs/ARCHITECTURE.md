@@ -167,4 +167,52 @@ backend/app/
   agents/       the agents, each with a tool allowlist and an execution policy
   orchestrator/ task graph and engine
   api/          FastAPI routers
+frontend/
+  app/          one route per page; every page is a client component that
+                reads the API directly, so what is on screen is backend state
+  lib/          api.ts (typed client), types.ts (contract mirrors), hooks.ts
+  components/   ui.tsx (primitives), shell.tsx, nav.tsx
+  e2e/          browser smoke test
 ```
+
+## The frontend
+
+### It reads state, it does not keep its own
+
+Every page is a client component that fetches from the API on mount and after
+any mutation. There is no client-side store holding a parallel copy of the
+project, because a second copy is a second source of truth and the whole point
+of the backend's artifact versioning is that there is exactly one. The cost is
+a round trip after each action; the benefit is that the screen cannot drift
+from what was persisted.
+
+The same reasoning governs what is displayed. The capability register, the QA
+verdict, the export's presence on disk, the diagram's node positions — all are
+computed by the backend and rendered as received. A page never derives
+"validated" or "available" for itself, so it cannot claim something the
+backend would not.
+
+### 404 is a state, not an error
+
+`useAsync` separates `missing` from `error`: a 404 from an artifact endpoint
+means the agent that produces it has not run, and the page says so and offers
+the button that runs it. Any other failure is shown as a failure. Conflating
+the two would let a broken backend look like an empty project.
+
+### No credential reaches the browser
+
+The client only ever requests relative `/api/*` URLs. `next.config.mjs`
+rewrites those to the backend **server-side**, so the backend's address is not
+in the bundle and no `NEXT_PUBLIC_*` variable carries anything. The auth token,
+where the deployment requires one, lives in `sessionStorage` and is attached
+per request.
+
+### Mutations report what happened
+
+Every action button is wired to `useAction`, which carries its own pending and
+error state, and the page renders the backend's actual response — including
+its refusals. Saving an invalid DAX expression shows the failing gate and the
+reason nothing was stored, rather than a success toast. (`useAction` keeps the
+action in a ref rather than a `useCallback` dependency list: a frozen closure
+there silently re-submitted the form's mount-time state, which is how an
+edited measure became a no-op save of the original.)

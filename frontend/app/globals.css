@@ -1,0 +1,37 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  @apply bg-paper-soft text-ink antialiased;
+  font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+}
+
+/* Keyboard focus stays visible everywhere; the designer and DAX studio are
+   usable without a mouse. */
+:focus-visible {
+  @apply outline-none ring-2 ring-brand ring-offset-1;
+}
+
+::selection {
+  @apply bg-brand-light text-brand-dark;
+}
+
+/* Thin scrollbars inside data panes so a wide preview table does not shove
+   the layout around. */
+.scroll-thin::-webkit-scrollbar {
+  height: 8px;
+  width: 8px;
+}
+.scroll-thin::-webkit-scrollbar-thumb {
+  @apply rounded bg-paper-line;
+}

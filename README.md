@@ -29,17 +29,44 @@ probed evidence behind every row above.
 ## Quick start
 
 ```bash
-# backend
+# 1. backend
 cd backend
 pip install -r requirements.txt
 uvicorn app.main:app --reload            # http://127.0.0.1:8000/docs
 
-# sample data with documented, deliberate defects
+# 2. sample data with documented, deliberate defects
 python ../samples/generate.py
 
-# tests
-python -m pytest
+# 3. a worked sample project, driven through the real HTTP API
+cd ..
+python scripts/seed_sample_project.py --auto-approve
+
+# 4. the UI
+cd frontend
+npm install
+npm run build && npm start               # http://127.0.0.1:3000
 ```
+
+`--auto-approve` answers the approval gates so the seed runs unattended;
+without it the pipeline stops at the first gate, which is the normal
+behaviour. On the sample data the ten workflow tasks all succeed and the
+figures reproduce exactly — see [`samples/EXPECTED.md`](samples/EXPECTED.md).
+
+The browser talks only to `/api/*` on its own origin; Next proxies that to
+FastAPI through a **server-side rewrite**, so neither the backend host nor any
+credential is compiled into the client bundle.
+
+### Tests
+
+```bash
+cd backend  && python -m pytest          # 276 passed, 1 skipped
+cd frontend && npm run typecheck
+cd frontend && npm run e2e               # drives a real browser over all 8 pages
+```
+
+The end-to-end script needs the backend, a seeded project and the built
+frontend all running; it fails on a page error, a failed request, or a control
+that does not do what it says.
 
 No API key is required. Without `ANTHROPIC_API_KEY` the system runs its
 deterministic **heuristic planner**, and every artifact it produces is stamped
@@ -56,6 +83,12 @@ backend/app/
   agents/       the nine agents, each with a declared tool allowlist and policy
   orchestrator/ task dependency graph, approval gates, retries
   api/          FastAPI routers
+frontend/
+  app/          the eight pages, plus project creation and the capability register
+  lib/          typed API client over the 36 endpoints, contract types, hooks
+  components/   shared UI primitives and the application shell
+  e2e/          browser smoke test for every page and every control
+scripts/        seed the sample project through the HTTP API
 samples/        generator for the sample project + expected results
 docs/           architecture, integration limits, DAX subset
 ```
@@ -64,4 +97,5 @@ docs/           architecture, integration limits, DAX subset
 
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — design and the reasoning behind it
 - [`docs/INTEGRATION_LIMITATIONS.md`](docs/INTEGRATION_LIMITATIONS.md) — what was probed and what follows
-- [`docs/SETUP.md`](docs/SETUP.md) — configuration and deployment
+- [`docs/DAX_SUBSET.md`](docs/DAX_SUBSET.md) — exactly which DAX can be executed here, and what happens to the rest
+- [`samples/EXPECTED.md`](samples/EXPECTED.md) — the sample project's planted defects and the figures they must reproduce
