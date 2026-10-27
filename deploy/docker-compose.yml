@@ -1,0 +1,109 @@
+# A complete, self-contained deployment: Postgres, the API, the front end, and
+# an OIDC proxy that terminates corporate sign-in.
+#
+# This is the reference topology. It maps directly onto a managed platform:
+# swap `postgres` for a managed database, and `auth-proxy` for the platform's
+# own authentication (Azure Container Apps auth, an AWS ALB OIDC action), which
+# inject the same identity headers.
+#
+#   cp .env.example .env    # then fill AUTH_SECRET, DATABASE_URL, CORS_ORIGINS
+#   docker compose up -d --build
+#
+# Only `auth-proxy` publishes a port. The API and the front end are reachable
+# on the internal network alone, which is what makes TRUST_PROXY_AUTH safe:
+# nothing can bypass the proxy to set the identity headers itself.
+
+name: agent-analyst
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: agent_analyst
+      POSTGRES_USER: agent_analyst
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agent_analyst -d agent_analyst"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks: [internal]
+    restart: unless-stopped
+
+  api:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://agent_analyst:${POSTGRES_PASSWORD}@postgres:5432/agent_analyst
+      DATA_DIR: /var/lib/agent-analyst
+    volumes:
+      - appdata:/var/lib/agent-analyst
+    depends_on:
+      postgres: {condition: service_healthy}
+    networks: [internal]
+    restart: unless-stopped
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    deploy:
+      resources:
+        limits: {cpus: "2.0", memory: 4G}
+
+  web:
+    build:
+      context: ../frontend
+      dockerfile: Dockerfile
+    environment:
+      # Server-side only. The browser calls /api on its own origin; Next
+      # proxies it, so no backend address is compiled into the bundle.
+      BACKEND_URL: http://api:8000
+    depends_on:
+      api: {condition: service_started}
+    networks: [internal]
+    restart: unless-stopped
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+
+  # Terminates corporate sign-in and injects the verified identity as headers.
+  # Replace with your platform's own authentication where it has one.
+  auth-proxy:
+    image: quay.io/oauth2-proxy/oauth2-proxy:v7.7.1
+    command:
+      - --provider=oidc
+      - --oidc-issuer-url=${OIDC_ISSUER_URL:?set OIDC_ISSUER_URL in .env}
+      - --client-id=${OIDC_CLIENT_ID:?set OIDC_CLIENT_ID in .env}
+      - --client-secret=${OIDC_CLIENT_SECRET:?set OIDC_CLIENT_SECRET in .env}
+      - --cookie-secret=${OIDC_COOKIE_SECRET:?32 bytes, base64}
+      - --email-domain=${ALLOWED_EMAIL_DOMAIN:-*}
+      - --upstream=http://web:3000
+      - --http-address=0.0.0.0:4180
+      - --reverse-proxy=true
+      - --skip-provider-button=true
+      - --cookie-secure=true
+      - --cookie-samesite=lax
+      # These are the headers the API reads when TRUST_PROXY_AUTH=true.
+      - --set-xauthrequest=true
+      - --pass-access-token=false
+      - --pass-authorization-header=false
+    ports:
+      - "4180:4180"
+    depends_on:
+      web: {condition: service_started}
+    networks: [internal]
+    restart: unless-stopped
+    security_opt: [no-new-privileges:true]
+
+volumes:
+  pgdata:
+  appdata:
+
+networks:
+  internal:
+    driver: bridge

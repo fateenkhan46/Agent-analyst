@@ -1,7 +1,7 @@
 """Sign-up / sign-in."""
 from __future__ import annotations
 
-from fastapi import APIRouter, Body, HTTPException, status
+from fastapi import APIRouter, Body, HTTPException, Request, status
 
 from ..config import get_settings
 from ..schemas.agent import AuditAction
@@ -15,7 +15,41 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 
 
 @router.post("/register", status_code=status.HTTP_201_CREATED)
-def register(payload: dict = Body(...), s: Session = Depends(get_session)) -> dict[str, object]:
+def register(
+    request: Request,
+    payload: dict = Body(...),
+    s: Session = Depends(get_session),
+) -> dict[str, object]:
+    """Create an account.
+
+    Closed by default. On a corporate deployment accounts come from the
+    directory -- either provisioned on first sign-in through the
+    authenticating proxy, or created by an administrator here. Leaving this
+    open would let anyone who can reach the API grant themselves a tenant.
+    """
+    settings = get_settings()
+    email_attempted = str(payload.get("email", "")).strip().lower()
+    if not settings.allow_open_registration:
+        # An administrator may still create accounts; anyone else is refused
+        # without being told whether registration merely needs a token.
+        try:
+            principal = current_principal(request, s)
+            is_admin = principal.role in {"owner", "admin"} and not principal.is_dev
+        except HTTPException:
+            is_admin = False
+        if not is_admin:
+            repo.record_denial(
+                s, actor="anonymous", action=AuditAction.AUTH_DENIED,
+                summary="Registration attempted while self-registration is closed.",
+                detail={"email": email_attempted},
+            )
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN,
+                "Self-registration is disabled on this deployment. Accounts are "
+                "provisioned through your organisation's identity provider, or by "
+                "an administrator.",
+            )
+
     email = str(payload.get("email", "")).strip().lower()
     password = str(payload.get("password", ""))
     if "@" not in email or len(email) < 5:
@@ -46,7 +80,7 @@ def login(payload: dict = Body(...), s: Session = Depends(get_session)) -> dict[
     email = str(payload.get("email", "")).strip().lower()
     row = repo.get_user_by_email(s, email)
     if row is None or not verify_password(str(payload.get("password", "")), row.password_hash):
-        repo.record_audit(
+        repo.record_denial(
             s, actor=email or "unknown", action=AuditAction.AUTH_DENIED,
             summary="Failed sign-in attempt.",
         )

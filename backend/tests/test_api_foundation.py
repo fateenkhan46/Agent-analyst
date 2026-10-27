@@ -256,7 +256,7 @@ def test_invalid_token_is_rejected(client) -> None:
     assert r.status_code == 401
 
 
-def test_register_and_login(client) -> None:
+def test_register_and_login(client, open_registration) -> None:
     r = client.post("/api/v1/auth/register", json={
         "email": "a@example.com", "password": "correct-horse-battery",
     })
@@ -270,12 +270,12 @@ def test_register_and_login(client) -> None:
     assert me["email"] == "a@example.com" and me["development_mode"] is False
 
 
-def test_weak_password_is_refused(client) -> None:
+def test_weak_password_is_refused(client, open_registration) -> None:
     r = client.post("/api/v1/auth/register", json={"email": "b@example.com", "password": "short"})
     assert r.status_code == 400
 
 
-def test_login_failure_does_not_reveal_whether_the_account_exists(client) -> None:
+def test_login_failure_does_not_reveal_whether_the_account_exists(client, open_registration) -> None:
     client.post("/api/v1/auth/register", json={
         "email": "c@example.com", "password": "correct-horse-battery",
     })

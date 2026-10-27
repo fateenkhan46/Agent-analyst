@@ -14,9 +14,25 @@ from .db import init_db
 log = logging.getLogger("agent_analyst")
 
 
+class InsecureConfiguration(RuntimeError):
+    """Raised at boot when a production deployment is configured unsafely."""
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):  # noqa: ANN201
     settings = get_settings()
+
+    # Audit the settings before serving a single request. A deployment that is
+    # quietly open would otherwise look perfectly healthy.
+    from .startup_checks import check
+
+    report = check(settings)
+    for warning in report.warnings:
+        log.warning("startup: [%s] %s -- %s", warning.setting, warning.problem, warning.fix)
+    if not report.ok:
+        log.error("startup refused:\n%s", report.as_text())
+        raise InsecureConfiguration(report.as_text())
+
     init_db()
     log.info(
         "Agent Analyst ready: db=%s storage=%s llm=%s",
@@ -39,12 +55,20 @@ def create_app() -> FastAPI:
         version="0.6.0",
         lifespan=lifespan,
     )
+    # Middleware runs outermost-last, so these are added in reverse order of
+    # how a request meets them: headers wrap everything, then the rate limit
+    # rejects before CORS does any work.
+    from .middleware import RateLimitMiddleware, SecurityHeadersMiddleware
+
+    app.add_middleware(SecurityHeadersMiddleware)
+    app.add_middleware(RateLimitMiddleware)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origin_list,
         allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
+        allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+        allow_headers=["Authorization", "Content-Type"],
+        max_age=600,
     )
 
     from .api import (

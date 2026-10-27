@@ -71,6 +71,45 @@ class Settings(BaseSettings):
 
     cors_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
 
+    # --- enterprise deployment -----------------------------------------
+    allow_open_registration: bool = Field(
+        default=False,
+        description="POST /auth/register without a token. Off by default: on a "
+        "corporate deployment accounts come from the directory, not from anyone "
+        "who can reach the API.",
+    )
+    trust_proxy_auth: bool = Field(
+        default=False,
+        description="Take the signed-in identity from headers set by an "
+        "authenticating reverse proxy (Azure App Service EasyAuth, an AWS ALB "
+        "with OIDC, oauth2-proxy). Only enable when the app is unreachable "
+        "except through that proxy -- otherwise a caller can set the headers "
+        "themselves.",
+    )
+    proxy_auth_email_header: str = "x-auth-request-email"
+    proxy_auth_user_header: str = "x-auth-request-user"
+    proxy_auth_groups_header: str = "x-auth-request-groups"
+    proxy_admin_groups: str = Field(
+        default="",
+        description="Comma-separated directory groups whose members get the "
+        "admin role. Everyone else is a member.",
+    )
+    rate_limit_per_minute: int = Field(
+        default=120, description="Per-client requests a minute. 0 disables."
+    )
+    rate_limit_auth_per_minute: int = Field(
+        default=10, description="Tighter bucket for the sign-in endpoints."
+    )
+    hsts_seconds: int = Field(
+        default=0,
+        description="Strict-Transport-Security max-age. Leave 0 until TLS is "
+        "terminated in front of the app, or browsers will refuse plain HTTP.",
+    )
+
+    @property
+    def admin_group_list(self) -> list[str]:
+        return [g.strip() for g in self.proxy_admin_groups.split(",") if g.strip()]
+
     model_config = {"env_file": ".env", "env_prefix": "", "extra": "ignore"}
 
     # --- derived -------------------------------------------------------

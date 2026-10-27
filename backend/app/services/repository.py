@@ -416,6 +416,34 @@ def record_audit(
     return ev
 
 
+def record_denial(
+    s: Session, *, project_id: str = "", actor: str, action: AuditAction,
+    summary: str = "", target: str = "", detail: dict[str, Any] | None = None,
+    severity: Severity = Severity.MEDIUM,
+) -> AuditEvent:
+    """Record a refused access so that it survives the request being aborted.
+
+    A handler that denies raises, and the request's transaction is then rolled
+    back -- discarding any audit row written inside it. Every refused access
+    was invisible in the trail for exactly that reason: failed sign-ins,
+    cross-tenant attempts, closed registration. Those are the events a security
+    review most wants.
+
+    Writing from a second session deadlocks on SQLite, which serialises
+    writers. So this rolls the caller's transaction back first -- safe, because
+    the handler is about to abort it anyway -- and then commits the audit row
+    on that same connection. What the request was doing is discarded; the fact
+    that it was denied is kept.
+    """
+    s.rollback()
+    event = record_audit(
+        s, project_id=project_id, actor=actor, action=action, summary=summary,
+        target=target, detail=detail, severity=severity,
+    )
+    s.commit()
+    return event
+
+
 def list_audit(
     s: Session, *, project_id: str | None = None, limit: int = 200,
     actions: list[str] | None = None, offset: int = 0,

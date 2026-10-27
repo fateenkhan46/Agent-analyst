@@ -115,6 +115,55 @@ def ensure_dev_user(s: Session) -> repo.UserRow:
     return row
 
 
+def principal_from_proxy(request: Request, s: Session) -> Principal | None:
+    """Identity asserted by an authenticating reverse proxy.
+
+    Azure App Service EasyAuth, an AWS ALB with an OIDC action and oauth2-proxy
+    all terminate the sign-in and inject the verified identity as headers. That
+    is how corporate SSO reaches an app that speaks no SAML or OIDC itself, and
+    it works with whichever identity provider the organisation runs.
+
+    The headers are only trustworthy when the app cannot be reached except
+    through that proxy, because any caller that reaches it directly can set
+    them. ``trust_proxy_auth`` is therefore off by default, and the deployment
+    notes make the network requirement explicit.
+    """
+    settings = get_settings()
+    if not settings.trust_proxy_auth:
+        return None
+    email = request.headers.get(settings.proxy_auth_email_header, "").strip().lower()
+    if not email or "@" not in email:
+        return None
+
+    row = repo.get_user_by_email(s, email)
+    if row is None:
+        # First sign-in: the directory has already vouched for this person, so
+        # provision them rather than refusing. The password hash is unusable --
+        # these accounts cannot sign in locally.
+        row = repo.create_user(
+            s, email=email,
+            display_name=request.headers.get(settings.proxy_auth_user_header, "").strip() or email,
+            password_hash="!", role="member",
+        )
+        repo.record_audit(
+            s, actor=row.id, action=AuditAction.AUTH_LOGIN,
+            summary=f"Account provisioned from the identity provider for {email}.",
+        )
+
+    # Role follows directory group membership, so joiners and leavers are
+    # handled by the directory rather than by this application.
+    role = row.role
+    admin_groups = settings.admin_group_list
+    if admin_groups:
+        groups = {
+            g.strip().lower()
+            for g in request.headers.get(settings.proxy_auth_groups_header, "").split(",")
+            if g.strip()
+        }
+        role = "admin" if groups & {g.lower() for g in admin_groups} else "member"
+    return Principal(row.id, row.tenant_id, row.email, role)
+
+
 def current_principal(
     request: Request, s: Session = Depends(get_session)
 ) -> Principal:
@@ -122,6 +171,11 @@ def current_principal(
     attributed to the dev user rather than refused, so the app is usable out
     of the box; in any other environment a token is mandatory."""
     settings = get_settings()
+
+    proxied = principal_from_proxy(request, s)
+    if proxied is not None:
+        return proxied
+
     header = request.headers.get("authorization", "")
     token = header[7:].strip() if header.lower().startswith("bearer ") else ""
     if not token:
@@ -151,7 +205,7 @@ def authorise_project(s: Session, principal: Principal, project_id: str):
     if project is None or project.tenant_id != principal.tenant_id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Project not found.")
     if project.owner_id != principal.user_id and principal.role not in {"owner", "admin"}:
-        repo.record_audit(
+        repo.record_denial(
             s, project_id=project_id, actor=principal.user_id,
             action=AuditAction.AUTH_DENIED, severity=Severity.MEDIUM,
             summary="Denied access to a project owned by another user.",

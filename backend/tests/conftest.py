@@ -82,6 +82,20 @@ FIXTURE_KPIS = [
 
 
 @pytest.fixture
+def open_registration(monkeypatch) -> Iterator[None]:
+    """Self-registration is closed by default, so a deployment cannot be left
+    open by accident. Tests that exercise local sign-up turn it on explicitly,
+    exactly as an operator would have to."""
+    from app.config import get_settings
+
+    monkeypatch.setenv("ALLOW_OPEN_REGISTRATION", "true")
+    get_settings.cache_clear()
+    yield
+    monkeypatch.delenv("ALLOW_OPEN_REGISTRATION", raising=False)
+    get_settings.cache_clear()
+
+
+@pytest.fixture
 def project_id(client) -> str:
     r = client.post("/api/v1/projects", json={
         "name": "Test Project",
