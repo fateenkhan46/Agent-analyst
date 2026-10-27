@@ -170,7 +170,7 @@ def _simple_aggregation(
         if function == "AVERAGE" else "aggregates at each level independently"
     )
     if guard_note:
-        behaviour = f"{behaviour} {guard_note}"
+        behaviour = f"{behaviour.rstrip('. ')}. {guard_note}"
     return expression, {"value": grounding}, grounding.table, behaviour
 
 
@@ -193,7 +193,8 @@ def _budget_measure(
         grounding.table,
         "additive across projects only. Budget is stored once per project, so slicing "
         "by cost category or by date repeats the same value -- the measure is correct "
-        "at project grain and above, and misleading below it. " + guard_note,
+        "at project grain and above, and misleading below it."
+        + (f" {guard_note}" if guard_note else ""),
     )
 
 
@@ -550,19 +551,15 @@ def generate_measures(
 
         measure = MeasureDefinition(
             name=name, expression=expression,
-            home_table=home_table or (
-                model.fact_tables[0].name if model.fact_tables else
-                (model.tables[0].name if model.tables else "")
-            ),
+            home_table=home_table or _default_home(model),
             kpi_id=kpi.id,
             description=_explanation(kpi, expression, grounding),
             format_string=kpi.format_string or shape.format_string if shape else "",
             display_folder=_folder_for(kpi),
             unit=kpi.unit,
-            assumptions=(list(shape.assumptions) if shape else []) + (
-                [note for note in [
-                    _currency_guard(model, grounding.get("value", Grounding()))[1]
-                ] if note]
+            assumptions=_unique(
+                (list(shape.assumptions) if shape else [])
+                + [_currency_guard(model, grounding.get("value", Grounding()))[1]]
             ),
             aggregation_behaviour=behaviour,
             depends_on_measures=sorted({
@@ -615,6 +612,39 @@ def generate_measures(
         notes.append(f"{item['name'] or item['kpi']}: {item['reason']}")
 
     return {"measures": measures, "rejected": rejected, "notes": notes}
+
+
+def _unique(items: list[str]) -> list[str]:
+    """Order-preserving de-duplication.
+
+    The currency note can arrive both from the catalogue's assumptions and from
+    the grounding check; printing it twice in the generated documentation reads
+    as carelessness.
+    """
+    seen: set[str] = set()
+    out: list[str] = []
+    for item in items:
+        text = (item or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        out.append(text)
+    return out
+
+
+def _default_home(model: SemanticModel) -> str:
+    """Where to attach a measure that aggregates nothing directly.
+
+    A pure measure expression (``[Total Budget] - [Total Cost]``) has no
+    column of its own, but every measure needs a home table. The largest fact
+    table is the sensible default: it is where a report author looks first, and
+    attaching such a measure to a small or unrelated table makes the field list
+    confusing.
+    """
+    facts = sorted(model.fact_tables, key=lambda t: -t.row_count)
+    if facts:
+        return facts[0].name
+    return model.tables[0].name if model.tables else ""
 
 
 def _folder_for(kpi: KpiRequirement) -> str:

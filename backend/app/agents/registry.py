@@ -40,6 +40,7 @@ def tool_registry() -> dict[str, Callable[..., Any]]:
         "app.services.prep.registry",
         "app.services.semantic.registry",
         "app.services.dax.registry",
+        "app.services.report.registry",
         "app.services.pbip.registry",
         "app.services.qa.registry",
     ):
