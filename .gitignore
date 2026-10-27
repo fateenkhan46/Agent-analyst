@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+.venv/
+venv/
+data/
+.env
+.DS_Store
+node_modules/
+.next/
+out/
+samples/sample_project/
