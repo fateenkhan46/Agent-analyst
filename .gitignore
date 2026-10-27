@@ -12,3 +12,5 @@ node_modules/
 .next/
 out/
 samples/sample_project/
+.run/
+.venv/

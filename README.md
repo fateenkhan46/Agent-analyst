@@ -29,33 +29,45 @@ probed evidence behind every row above.
 ## Quick start
 
 ```bash
-# 1. backend
+./run.sh --sample
+```
+
+One command. It checks your Python and Node versions, installs what is
+missing, generates the sample data, builds the UI, starts both services and
+loads a worked project, then prints a link. `./run.sh --stop` stops it.
+
+Everything runs on your machine: a local API, a SQLite file and an uploads
+folder under `./data`. **No data leaves the machine** — see below.
+
+<details>
+<summary>Running the pieces by hand</summary>
+
+```bash
 cd backend
 pip install -r requirements.txt
 uvicorn app.main:app --reload            # http://127.0.0.1:8000/docs
 
-# 2. sample data with documented, deliberate defects
-python ../samples/generate.py
+python ../samples/generate.py            # sample data with planted defects
+cd .. && python scripts/seed_sample_project.py --auto-approve
 
-# 3. a worked sample project, driven through the real HTTP API
-cd ..
-python scripts/seed_sample_project.py --auto-approve
-
-# 4. the UI
-cd frontend
-npm install
-npm run build && npm start               # http://127.0.0.1:3000
+cd frontend && npm install && npm run build && npm start
 ```
+</details>
 
-`--auto-approve` answers the approval gates so the seed runs unattended;
-without it the pipeline stops at the first gate, which is the normal
-behaviour. On the sample data the ten workflow tasks all succeed and the
-figures reproduce exactly — see [`samples/EXPECTED.md`](samples/EXPECTED.md).
+## Your data stays on your machine
 
-The browser talks only to `/api/*` on its own origin; Next proxies that to
-FastAPI through a **server-side rewrite**, so neither the backend host nor any
-credential is compiled into the client bundle.
+With no `ANTHROPIC_API_KEY` configured, this system makes **no network calls at
+all**. Not a request, not a DNS lookup. That is not a promise in a document —
+`backend/tests/test_no_egress.py` runs the entire pipeline on the sample data
+with every outbound socket and DNS lookup intercepted, and fails if a single
+byte would leave the machine. A second test deliberately attempts an outbound
+call to prove the guard actually fires.
 
+Setting an API key changes that: uploaded files and meeting transcripts are
+then sent to a third-party API. Nothing does so by default, and a production
+deployment logs a warning naming it at boot when a key is present.
+
+### Tests
 ### Tests
 
 ```bash
